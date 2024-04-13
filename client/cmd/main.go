@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/rsa"
-	"fmt"
 	"io"
 	"log"
 	"net"
@@ -14,89 +14,73 @@ import (
 func main() { // берем адрес сервера из аргументов командной строки
 	conn, err := net.Dial("tcp", "localhost:8080") // открываем TCP-соединение к серверу
 	if err != nil {
-		fmt.Println(1)
 		log.Fatal(err)
 	}
 
-	clientPrivateKey, clientPublicKey := sign.GenerateKeyPair()
-
-	fmt.Println("client keys", clientPrivateKey, clientPublicKey)
-
-	clientPublicKeyBytes := sign.PublicKeyToBytes(clientPublicKey)
-
-	fmt.Println("key for server", clientPublicKeyBytes)
-
-	write, err := conn.Write(clientPublicKeyBytes)
+	clientPrivateKey, clientPublicKey, err := sign.GenerateKeyPair()
 	if err != nil {
-		fmt.Println(2)
-		log.Fatal(err)
+		log.Fatalf("failed to generate key pair: %s", err)
 	}
 
-	fmt.Println(write)
+	clientPublicKeyBytes, err := sign.PublicKeyToBytes(clientPublicKey)
+	if err != nil {
+		log.Fatalf("failed to convert public key to bytes: %s", err)
+	}
+
+	if _, err = conn.Write(clientPublicKeyBytes); err != nil {
+		log.Fatalf("failed to send client public key to server: %s", err)
+	}
 
 	serverPublicKeyBytes := make([]byte, 8192)
 	serverPublicKeyLen, err := conn.Read(serverPublicKeyBytes)
 	if err != nil {
-		fmt.Println(3)
-		log.Fatal(err)
+		log.Fatalf("failed to read server public key: %s", err)
 	}
 
-	fmt.Println("server key", serverPublicKeyLen, serverPublicKeyBytes)
-
-	serverPublicKey := sign.BytesToPublicKey(serverPublicKeyBytes[:serverPublicKeyLen])
-
-	fmt.Println("server private key", serverPublicKey)
+	serverPublicKey, err := sign.BytesToPublicKey(serverPublicKeyBytes[:serverPublicKeyLen])
+	if err != nil {
+		log.Fatalf("failed to convert server public key to bytes: %s", err)
+	}
 
 	go ReadFromConn(os.Stdout, conn, clientPrivateKey)
 	WriteToConn(conn, os.Stdin, serverPublicKey)
 }
 
 func ReadFromConn(out io.Writer, in net.Conn, clientPublicKey *rsa.PrivateKey) {
-	message := make([]byte, 8192)
+	message := make([]byte, 512)
 
 	for {
-		read, err := in.Read(message)
-		if err != nil {
-			fmt.Println(4)
-			log.Fatal(err)
+		if _, err := in.Read(message); err != nil {
+			log.Fatalf("failed to read from client: %s", err)
 		}
 
-		fmt.Println("read message", message[:read])
+		encodeMessage, err := sign.DecryptWithPrivateKey(message, clientPublicKey)
+		if err != nil {
+			log.Fatalf("failed to decrypt message: %s", err)
+		}
 
-		encodeMessage := sign.DecryptWithPrivateKey(message[:read], clientPublicKey)
-
-		fmt.Println("encode message", encodeMessage)
-		if _, err = io.Copy(out, bytes.NewReader(encodeMessage)); err != nil {
-			fmt.Println(5)
+		if _, err := io.Copy(out, bytes.NewReader(encodeMessage)); err != nil {
 			log.Fatal(err)
 		}
 	}
 }
 
-func WriteToConn(out net.Conn, in io.Writer, serverPublicKey *rsa.PublicKey) {
-	message := make([]byte, 8192)
+func WriteToConn(out net.Conn, in io.Reader, serverPublicKey *rsa.PublicKey) {
+	message := make([]byte, 512)
 
 	for {
-		write, err := in.Write(message)
+		messageLen, err := bufio.NewReader(in).Read(message)
 		if err != nil {
-			fmt.Println(6)
-			log.Fatal(err)
-		}
-		if message[0] == byte(0) {
-			continue
+			log.Fatalf("failed to read from client: %s", err)
 		}
 
-		decodeMessage := sign.EncryptWithPublicKey(message[:write], serverPublicKey)
-
-		if _, err = io.Copy(out, bytes.NewReader(decodeMessage)); err != nil {
-			fmt.Println(7)
-			log.Fatal(err)
+		decodeMessage, err := sign.EncryptWithPublicKey(message[:messageLen], serverPublicKey)
+		if err != nil {
+			log.Fatalf("failed to encrypt message: %s", err)
 		}
-	}
-}
 
-func copyTo(dst io.Writer, src io.Reader) {
-	if _, err := io.Copy(dst, src); err != nil {
-		log.Fatal(err)
+		if _, err = out.Write(decodeMessage); err != nil {
+			log.Fatalf("failed to write to client: %s", err)
+		}
 	}
 }

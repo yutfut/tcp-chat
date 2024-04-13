@@ -2,7 +2,6 @@ package main
 
 import (
 	"crypto/rsa"
-	"fmt"
 	"log"
 	"net"
 	"tcp-chat/sign"
@@ -13,50 +12,59 @@ type Message struct {
 	Message []byte
 }
 
+type Client struct {
+	ClientConn      net.Conn
+	ClientPublicKey *rsa.PublicKey
+}
+
 func main() {
-	listener, err := net.Listen("tcp", "localhost:8080") // открываем слушающий сокет
+	listener, err := net.Listen("tcp", "localhost:8080")
 	if err != nil {
-		log.Fatal(1, err)
+		log.Fatalf("failed to listen: %v", err)
 	}
 
-	serverPrivateKey, serverPublicKey := sign.GenerateKeyPair()
+	serverPrivateKey, serverPublicKey, err := sign.GenerateKeyPair()
+	if err != nil {
+		log.Fatalf("failed to generate key pair: %v", err)
+	}
 
-	fmt.Println(serverPrivateKey, serverPublicKey)
-
-	serverPublicKeyByte := sign.PublicKeyToBytes(serverPublicKey)
+	serverPublicKeyByte, err := sign.PublicKeyToBytes(serverPublicKey)
+	if err != nil {
+		log.Fatalf("failed to convert public key to bytes: %v", err)
+	}
 
 	message := make(chan Message)
-
-	clients := make(map[int]net.Conn)
-
+	clients := make(map[int]Client)
 	id := 1
 
-	go broadcast(clients, message, serverPrivateKey)
+	go broadcast(clients, message)
 
-	clientPublicKeyBytes := make([]byte, 8192)
-
+	clientPublicKeyBytes := make([]byte, 2048)
 	for {
-		conn, err := listener.Accept()
-		if err != nil {
+		var conn net.Conn
+		if conn, err = listener.Accept(); err != nil {
 			continue
 		}
 
-		read, err := conn.Read(clientPublicKeyBytes)
-		if err != nil {
-			log.Fatal(2, err)
-		}
-		fmt.Println(read)
-
-		_, err = conn.Write(serverPublicKeyByte)
-		if err != nil {
-			log.Fatal(3, err)
+		if _, err = conn.Read(clientPublicKeyBytes); err != nil {
+			log.Printf("Error reading from client: %v", err)
 		}
 
-		clientPublicKey := sign.BytesToPublicKey(clientPublicKeyBytes[:read])
+		if _, err = conn.Write(serverPublicKeyByte); err != nil {
+			log.Printf("Error writing to client: %v", err)
+		}
 
-		clients[id] = conn
+		clientPublicKey, err := sign.BytesToPublicKey(clientPublicKeyBytes)
+		if err != nil {
+			log.Printf("Error converting bytes to public key: %v", err)
+		}
 
-		go handleClient(conn, message, id, clientPublicKey)
+		clients[id] = Client{
+			ClientConn:      conn,
+			ClientPublicKey: clientPublicKey,
+		}
+
+		go handleClient(conn, message, id, clientPublicKey, serverPrivateKey)
 
 		id++
 	}
@@ -64,54 +72,62 @@ func main() {
 	close(message)
 }
 
-func broadcast(clients map[int]net.Conn, message chan Message, serverPrivateKey *rsa.PrivateKey) {
+func broadcast(clients map[int]Client, message chan Message) {
 	for {
 		msg, ok := <-message
 		if !ok {
 			return
 		}
 
-		decryptMessage := sign.DecryptWithPrivateKey(msg.Message, serverPrivateKey)
-
 		for i, client := range clients {
 			if i == msg.ID {
 				continue
 			}
-			_, err := client.Write(decryptMessage)
+
+			decryptMessage, err := sign.EncryptWithPublicKey(msg.Message, client.ClientPublicKey)
 			if err != nil {
-				log.Fatal(4, err)
+				log.Fatalf("server encrypt error: %v", err)
+			}
+
+			if _, err = client.ClientConn.Write(decryptMessage); err != nil {
+				log.Printf("server writing error: %v", err)
 			}
 		}
 	}
 }
 
-func handleClient(conn net.Conn, message chan Message, id int, clientPublicKey *rsa.PublicKey) {
+func handleClient(conn net.Conn, message chan Message, id int, clientPrivateKey *rsa.PublicKey, serverPrivateKey *rsa.PrivateKey) {
 	defer conn.Close()
 
-	buf1 := make([]byte, 8192)
-
-	//encryptMessage := sign.EncryptWithPublicKey([]byte("Hello, what's your name?\n"), clientPublicKey)
-	encryptMessage := sign.EncryptWithPublicKey([]byte("Hello\n"), clientPublicKey)
-	_, err := conn.Write(encryptMessage)
+	encryptMessage, err := sign.EncryptWithPublicKey([]byte("Hello, what's your name?\n"), clientPrivateKey)
 	if err != nil {
-		log.Fatal(5, err)
+		log.Fatalf("server encrypt error: %v", err)
 	}
 
-	readLen, err := conn.Read(buf1)
-	if err != nil {
-		log.Println(6, err)
+	if _, err = conn.Write(encryptMessage); err != nil {
+		log.Fatalf("server writing error: %v", err)
 	}
 
-	username := append(buf1[:readLen-1], []byte(": ")...)
+	buf := make([]byte, 512)
+	if _, err = conn.Read(buf); err != nil {
+		log.Printf("Error reading from server: %v", err)
+	}
 
-	buf := make([]byte, 8192)
+	decryptUsername, err := sign.DecryptWithPrivateKey(buf, serverPrivateKey)
+	if err != nil {
+		log.Fatalf("server decrypt error: %v", err)
+	}
+	username := append(decryptUsername[:len(decryptUsername)-1], []byte(": ")...)
+
 	for {
-		readLen, err = conn.Read(buf)
-		if err != nil {
-			log.Fatal(7, err)
+		if _, err = conn.Read(buf); err != nil {
+			log.Printf("server reading error: %v", err)
 		}
 
-		encryptMessage = sign.EncryptWithPublicKey(buf[:readLen], clientPublicKey)
+		encryptMessage, err = sign.DecryptWithPrivateKey(buf, serverPrivateKey)
+		if err != nil {
+			log.Fatalf("server decrypt error: %v", err)
+		}
 
 		message <- Message{
 			ID:      id,
