@@ -101,32 +101,38 @@ func handleClient(conn net.Conn, message chan Message, id int, clientPrivateKey 
 
 	encryptMessage, err := sign.EncryptWithPublicKey([]byte("Hello, what's your name?\n"), clientPrivateKey)
 	if err != nil {
-		log.Fatalf("server encrypt error: %v", err)
+		log.Printf("server encrypt error: %v", err)
+		return
 	}
 
 	if _, err = conn.Write(encryptMessage); err != nil {
-		log.Fatalf("server writing error: %v", err)
+		log.Printf("server writing error: %v", err)
+		return
 	}
 
 	buf := make([]byte, 512)
 	if _, err = conn.Read(buf); err != nil {
 		log.Printf("Error reading from server: %v", err)
+		return
 	}
 
 	decryptUsername, err := sign.DecryptWithPrivateKey(buf, serverPrivateKey)
 	if err != nil {
-		log.Fatalf("server decrypt error: %v", err)
+		log.Printf("server decrypt error: %v", err)
+		return
 	}
 	username := append(decryptUsername[:len(decryptUsername)-1], []byte(": ")...)
 
 	for {
 		if _, err = conn.Read(buf); err != nil {
 			log.Printf("server reading error: %v", err)
+			return
 		}
 
 		encryptMessage, err = sign.DecryptWithPrivateKey(buf, serverPrivateKey)
 		if err != nil {
-			log.Fatalf("server decrypt error: %v", err)
+			log.Printf("server decrypt error: %v", err)
+			return
 		}
 
 		message <- Message{
