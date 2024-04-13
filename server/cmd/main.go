@@ -86,11 +86,12 @@ func broadcast(clients map[int]Client, message chan Message) {
 
 			decryptMessage, err := sign.EncryptWithPublicKey(msg.Message, client.ClientPublicKey)
 			if err != nil {
-				log.Fatalf("server encrypt error: %v", err)
+				log.Printf("server encrypt error: %v", err)
 			}
 
 			if _, err = client.ClientConn.Write(decryptMessage); err != nil {
-				log.Printf("server writing error: %v", err)
+				log.Printf("server writing error %d: %v", i, err)
+				delete(clients, i)
 			}
 		}
 	}
@@ -125,7 +126,7 @@ func handleClient(conn net.Conn, message chan Message, id int, clientPrivateKey 
 
 	for {
 		if _, err = conn.Read(buf); err != nil {
-			log.Printf("server reading error: %v", err)
+			log.Printf("server reading error %s %v", username, err)
 			return
 		}
 
